@@ -1,4 +1,4 @@
-// Copyright (c) 2022-2025 Alex Chi Z
+// Copyright (c)merged_iter 2022-2025 Alex Chi Z
 //
 // Licensed under the Apache License, Version 2.0 (the "License");
 // you may not use this file except in compliance with the License.
@@ -30,6 +30,7 @@ use crate::compact::{
     CompactionController, CompactionOptions, LeveledCompactionController, LeveledCompactionOptions,
     SimpleLeveledCompactionController, SimpleLeveledCompactionOptions, TieredCompactionController,
 };
+use crate::iterators::merge_iterator::MergeIterator;
 use crate::lsm_iterator::{FusedIterator, LsmIterator};
 use crate::manifest::Manifest;
 use crate::mem_table::MemTable;
@@ -394,7 +395,6 @@ impl LsmStorageInner {
             Arc::new(MemTable::create(self.next_sst_id())),
         );
         snapshot.imm_memtables.insert(0, old_memtable);
-        println!("snapshotted {}", snapshot.imm_memtables.len());
 
         *state = Arc::new(snapshot);
 
@@ -414,9 +414,17 @@ impl LsmStorageInner {
     /// Create an iterator over a range of keys.
     pub fn scan(
         &self,
-        _lower: Bound<&[u8]>,
-        _upper: Bound<&[u8]>,
+        lower: Bound<&[u8]>,
+        upper: Bound<&[u8]>,
     ) -> Result<FusedIterator<LsmIterator>> {
-        unimplemented!()
+        let state = self.state.read();
+        let mut iters = vec![Box::new(state.memtable.scan(lower, upper))];
+        for memtable in &state.imm_memtables {
+            iters.push(Box::new(memtable.scan(lower, upper)));
+        }
+
+        let merged_iter = MergeIterator::create(iters);
+
+        Ok(FusedIterator::new(LsmIterator::new(merged_iter)?))
     }
 }
