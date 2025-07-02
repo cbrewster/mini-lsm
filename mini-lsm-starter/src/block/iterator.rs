@@ -118,12 +118,12 @@ impl BlockIterator {
         let mut high = self.block.offsets.len();
 
         while low < high {
-            let midpoint = low + (high - low) / 2;
-            self.seek_to(midpoint);
+            let mid = low + (high - low) / 2;
+            self.seek_to(mid);
             assert!(self.is_valid());
             match self.key().cmp(&key) {
-                std::cmp::Ordering::Less => low = midpoint + 1,
-                std::cmp::Ordering::Greater => high = midpoint,
+                std::cmp::Ordering::Less => low = mid + 1,
+                std::cmp::Ordering::Greater => high = mid,
                 std::cmp::Ordering::Equal => return,
             }
         }
