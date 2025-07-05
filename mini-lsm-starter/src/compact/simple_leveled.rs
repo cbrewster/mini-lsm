@@ -59,7 +59,7 @@ impl SimpleLeveledCompactionController {
             return Some(SimpleLeveledCompactionTask {
                 upper_level: None,
                 upper_level_sst_ids: snapshot.l0_sstables.clone(),
-                lower_level: 0,
+                lower_level: 1,
                 lower_level_sst_ids: snapshot.levels[0].1.clone(),
                 is_lower_level_bottom_level: false,
             });
@@ -75,9 +75,9 @@ impl SimpleLeveledCompactionController {
                     "compaction triggered at level {upper_level} and {lower_level} with size ratio {ratio}",
                 );
                 return Some(SimpleLeveledCompactionTask {
-                    upper_level: Some(upper_level - 1),
+                    upper_level: Some(upper_level),
                     upper_level_sst_ids: snapshot.levels[upper_level - 1].1.clone(),
-                    lower_level: lower_level - 1,
+                    lower_level,
                     lower_level_sst_ids: snapshot.levels[lower_level - 1].1.clone(),
                     is_lower_level_bottom_level: lower_level == self.options.max_levels,
                 });
@@ -111,8 +111,8 @@ impl SimpleLeveledCompactionController {
 
         let mut tables_to_remove = upper_level_sst_ids.clone();
         if let Some(upper_level) = upper_level {
-            assert_eq!(upper_level_sst_ids, &state.levels[*upper_level].1);
-            state.levels[*upper_level].1.clear();
+            assert_eq!(upper_level_sst_ids, &state.levels[*upper_level - 1].1);
+            state.levels[*upper_level - 1].1.clear();
         } else {
             let mut upper_level_sst_ids_set = upper_level_sst_ids.iter().collect::<HashSet<_>>();
             state
@@ -121,8 +121,8 @@ impl SimpleLeveledCompactionController {
             assert!(upper_level_sst_ids_set.is_empty());
         }
 
-        tables_to_remove.extend_from_slice(&state.levels[*lower_level].1);
-        state.levels[*lower_level].1 = output.to_vec();
+        tables_to_remove.extend_from_slice(&state.levels[*lower_level - 1].1);
+        state.levels[*lower_level - 1].1 = output.to_vec();
 
         (state, tables_to_remove)
     }
