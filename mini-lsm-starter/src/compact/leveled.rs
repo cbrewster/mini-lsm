@@ -159,7 +159,7 @@ impl LeveledCompactionController {
         snapshot: &LsmStorageState,
         task: &LeveledCompactionTask,
         output: &[usize],
-        _in_recovery: bool,
+        in_recovery: bool,
     ) -> (LsmStorageState, Vec<usize>) {
         let LeveledCompactionTask {
             upper_level,
@@ -189,9 +189,12 @@ impl LeveledCompactionController {
         assert!(lower_level_sst_ids_to_remove.is_empty());
 
         state.levels[*lower_level - 1].1.extend_from_slice(output);
-        state.levels[*lower_level - 1]
-            .1
-            .sort_by_key(|sst_id| snapshot.sstables[sst_id].first_key());
+        // In recovery, SSTables are not loaded, yet, so we can't sort.
+        if !in_recovery {
+            state.levels[*lower_level - 1]
+                .1
+                .sort_by_key(|sst_id| snapshot.sstables[sst_id].first_key());
+        }
 
         let tables_to_remove = upper_level_sst_ids
             .iter()

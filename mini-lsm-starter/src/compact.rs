@@ -36,6 +36,7 @@ use crate::iterators::merge_iterator::MergeIterator;
 use crate::iterators::two_merge_iterator::TwoMergeIterator;
 use crate::key::KeySlice;
 use crate::lsm_storage::{LsmStorageInner, LsmStorageState};
+use crate::manifest::ManifestRecord;
 use crate::table::{SsTable, SsTableBuilder, SsTableIterator};
 
 #[derive(Debug, Serialize, Deserialize)]
@@ -277,13 +278,14 @@ impl LsmStorageInner {
         let l0_sstables = &snapshot.l0_sstables;
         let l1_sstables = &snapshot.levels[0].1;
 
-        let sstables = self.compact(&CompactionTask::ForceFullCompaction {
+        let task = CompactionTask::ForceFullCompaction {
             l0_sstables: l0_sstables.clone(),
             l1_sstables: l1_sstables.clone(),
-        })?;
+        };
+        let tables = self.compact(&task)?;
 
         {
-            let _state_lock = self.state_lock.lock();
+            let state_lock = self.state_lock.lock();
             let mut state = self.state.write();
             let mut new_state = state.as_ref().clone();
             for sst_id in l0_sstables.iter().chain(l1_sstables.iter()) {
@@ -293,10 +295,17 @@ impl LsmStorageInner {
                 .l0_sstables
                 .retain(|sst_id| new_state.sstables.contains_key(sst_id));
             new_state.levels[0].1.clear();
-            for table in sstables {
+            let mut output = Vec::with_capacity(tables.len());
+            for table in tables {
                 new_state.levels[0].1.push(table.sst_id());
+                output.push(table.sst_id());
                 new_state.sstables.insert(table.sst_id(), table);
             }
+
+            self.manifest
+                .add_record(&state_lock, ManifestRecord::Compaction(task, output))?;
+            self.sync_dir()?;
+
             *state = Arc::new(new_state);
         }
 
@@ -335,6 +344,10 @@ impl LsmStorageInner {
             for sst_id in &sst_ids_to_remove {
                 snapshot.sstables.remove(sst_id);
             }
+
+            self.manifest
+                .add_record(&state_lock, ManifestRecord::Compaction(task, output))?;
+            self.sync_dir()?;
 
             *self.state.write() = Arc::new(snapshot);
         }

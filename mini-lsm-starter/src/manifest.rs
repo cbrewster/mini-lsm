@@ -12,10 +12,8 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
-#![allow(unused_variables)] // TODO(you): remove this lint after implementing this mod
-#![allow(dead_code)] // TODO(you): remove this lint after implementing this mod
-
-use std::fs::File;
+use std::fs::{File, OpenOptions};
+use std::io::Read;
 use std::path::Path;
 use std::sync::Arc;
 
@@ -29,7 +27,7 @@ pub struct Manifest {
     file: Arc<Mutex<File>>,
 }
 
-#[derive(Serialize, Deserialize)]
+#[derive(Debug, Serialize, Deserialize)]
 pub enum ManifestRecord {
     Flush(usize),
     NewMemtable(usize),
@@ -37,12 +35,29 @@ pub enum ManifestRecord {
 }
 
 impl Manifest {
-    pub fn create(_path: impl AsRef<Path>) -> Result<Self> {
-        unimplemented!()
+    pub fn create(path: impl AsRef<Path>) -> Result<Self> {
+        let file = File::create(path)?;
+
+        Ok(Self {
+            file: Arc::new(Mutex::new(file)),
+        })
     }
 
-    pub fn recover(_path: impl AsRef<Path>) -> Result<(Self, Vec<ManifestRecord>)> {
-        unimplemented!()
+    pub fn recover(path: impl AsRef<Path>) -> Result<(Self, Vec<ManifestRecord>)> {
+        let mut file = OpenOptions::new().append(true).read(true).open(path)?;
+        let mut buf = Vec::new();
+        file.read_to_end(&mut buf)?;
+
+        let records = serde_json::Deserializer::from_slice(&buf)
+            .into_iter()
+            .collect::<serde_json::Result<Vec<_>>>()?;
+
+        Ok((
+            Self {
+                file: Arc::new(Mutex::new(file)),
+            },
+            records,
+        ))
     }
 
     pub fn add_record(
@@ -53,7 +68,12 @@ impl Manifest {
         self.add_record_when_init(record)
     }
 
-    pub fn add_record_when_init(&self, _record: ManifestRecord) -> Result<()> {
-        unimplemented!()
+    pub fn add_record_when_init(&self, record: ManifestRecord) -> Result<()> {
+        let mut file = self.file.lock();
+
+        serde_json::to_writer(&mut *file, &record)?;
+        file.sync_all()?;
+
+        Ok(())
     }
 }
