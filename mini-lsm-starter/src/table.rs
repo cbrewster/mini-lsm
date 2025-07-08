@@ -23,9 +23,9 @@ use std::fs::File;
 use std::path::Path;
 use std::sync::Arc;
 
-use anyhow::{Result, anyhow};
+use anyhow::{Result, anyhow, ensure};
 pub use builder::SsTableBuilder;
-use bytes::{Buf, BufMut};
+use bytes::{Buf, BufMut, Bytes};
 pub use iterator::SsTableIterator;
 
 use crate::block::Block;
@@ -143,25 +143,29 @@ impl SsTable {
     /// Open SSTable from a file.
     pub fn open(id: usize, block_cache: Option<Arc<BlockCache>>, file: FileObject) -> Result<Self> {
         let size = file.size();
-        let bloom_offset = file
-            .read(size - SIZEOF_U32 as u64, SIZEOF_U32 as u64)?
-            .as_slice()
-            .get_u32() as u64;
-        let bloom =
-            Bloom::decode(&file.read(bloom_offset, size - bloom_offset - SIZEOF_U32 as u64)?)?;
+        let mut bloom_meta: Bytes = file
+            .read(size - 2 * SIZEOF_U32 as u64, 2 * SIZEOF_U32 as u64)?
+            .into();
+        let expected_bloom_checksum = bloom_meta.get_u32();
+        let bloom_offset = bloom_meta.get_u32() as u64;
+        let encoded_bloom = file.read(bloom_offset, size - bloom_offset - 2 * SIZEOF_U32 as u64)?;
+        let bloom_checksum = crc32fast::hash(&encoded_bloom);
+        ensure!(bloom_checksum == expected_bloom_checksum);
+        let bloom = Bloom::decode(&encoded_bloom)?;
 
-        let block_meta_offset = file
-            .read(bloom_offset - SIZEOF_U32 as u64, SIZEOF_U32 as u64)?
-            .as_slice()
-            .get_u32() as usize;
+        let mut block_meta: Bytes = file
+            .read(bloom_offset - 2 * SIZEOF_U32 as u64, 2 * SIZEOF_U32 as u64)?
+            .into();
+        let expected_block_meta_checksum = block_meta.get_u32();
+        let block_meta_offset = block_meta.get_u32() as usize;
+        let encoded_block_meta = file.read(
+            block_meta_offset as u64,
+            bloom_offset - block_meta_offset as u64 - 2 * SIZEOF_U32 as u64,
+        )?;
+        let block_meta_checksum = crc32fast::hash(&encoded_block_meta);
+        ensure!(block_meta_checksum == expected_block_meta_checksum);
 
-        let block_meta = BlockMeta::decode_block_meta(
-            file.read(
-                block_meta_offset as u64,
-                bloom_offset - block_meta_offset as u64 - SIZEOF_U32 as u64,
-            )?
-            .as_slice(),
-        );
+        let block_meta = BlockMeta::decode_block_meta(encoded_block_meta.as_slice());
 
         Ok(Self {
             file,
@@ -205,9 +209,15 @@ impl SsTable {
             .map(|m| m.offset)
             .unwrap_or(self.block_meta_offset) as u64;
         assert!(end_idx > start_idx, "expected {end_idx} > {start_idx}");
-        Ok(Arc::new(Block::decode(
-            &self.file.read(start_idx, end_idx - start_idx)?,
-        )))
+        let encoded_block = &self.file.read(start_idx, end_idx - start_idx)?;
+        let (encoded_block, mut expected_checksum_bytes) =
+            encoded_block.split_at(encoded_block.len() - SIZEOF_U32);
+
+        let expected_checksum = expected_checksum_bytes.get_u32();
+        let checksum = crc32fast::hash(encoded_block);
+        ensure!(checksum == expected_checksum);
+
+        Ok(Arc::new(Block::decode(encoded_block)))
     }
 
     /// Read a block from disk, with block cache. (Day 4)

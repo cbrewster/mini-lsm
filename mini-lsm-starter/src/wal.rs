@@ -13,11 +13,12 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
-use anyhow::Result;
-use bytes::Bytes;
+use anyhow::{Result, ensure};
+use bytes::{BufMut, Bytes, BytesMut};
 use crossbeam_skiplist::SkipMap;
 use parking_lot::Mutex;
 use std::fs::{File, OpenOptions};
+use std::hash::Hasher;
 use std::io::{BufWriter, ErrorKind, Read, Write};
 use std::path::Path;
 use std::sync::Arc;
@@ -58,6 +59,18 @@ impl Wal {
             let mut value = vec![0u8; value_len as usize];
             file.read_exact(&mut value[..])?;
 
+            let mut expected_checksum_bytes = [0u8; 4];
+            file.read_exact(&mut expected_checksum_bytes[..])?;
+            let expected_checksum = u32::from_be_bytes(expected_checksum_bytes);
+
+            let mut hasher = crc32fast::Hasher::new();
+            hasher.write(&key_len.to_be_bytes());
+            hasher.write(&key);
+            hasher.write(&value_len.to_be_bytes());
+            hasher.write(&value);
+            let checksum = hasher.finalize();
+            ensure!(checksum == expected_checksum);
+
             skiplist.insert(key.into(), value.into());
         }
 
@@ -67,11 +80,16 @@ impl Wal {
     }
 
     pub fn put(&self, key: &[u8], value: &[u8]) -> Result<()> {
+        let mut buf = BytesMut::new();
+        buf.put_u16(key.len() as u16);
+        buf.put(key);
+        buf.put_u16(value.len() as u16);
+        buf.put(value);
+        let checksum = crc32fast::hash(&buf);
+        buf.put_u32(checksum);
+
         let mut file = self.file.lock();
-        file.write_all(&(key.len() as u16).to_be_bytes())?;
-        file.write_all(key)?;
-        file.write_all(&(value.len() as u16).to_be_bytes())?;
-        file.write_all(value)?;
+        file.write_all(&buf)?;
         file.flush()?;
         Ok(())
     }

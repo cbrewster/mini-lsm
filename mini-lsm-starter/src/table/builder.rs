@@ -92,7 +92,9 @@ impl SsTableBuilder {
             first_key: std::mem::take(&mut self.first_key).into_key_bytes(),
             last_key: std::mem::take(&mut self.last_key).into_key_bytes(),
         });
+        let checksum = crc32fast::hash(&encoded_block);
         self.data.extend(encoded_block);
+        self.data.put_u32(checksum);
     }
 
     /// Builds the SSTable and writes it to the given path. Use the `FileObject` structure to manipulate the disk objects.
@@ -107,6 +109,8 @@ impl SsTableBuilder {
         let mut buf = self.data;
         let block_meta_offset = buf.len();
         BlockMeta::encode_block_meta(&self.meta, &mut buf);
+        let block_meta_checksum = crc32fast::hash(&buf[block_meta_offset..]);
+        buf.put_u32(block_meta_checksum);
         buf.put_u32(block_meta_offset as u32);
 
         let bloom_offset = buf.len();
@@ -115,6 +119,8 @@ impl SsTableBuilder {
             Bloom::bloom_bits_per_key(self.key_hashes.len(), 0.01),
         );
         bloom.encode(&mut buf);
+        let bloom_checksum = crc32fast::hash(&buf[bloom_offset..]);
+        buf.put_u32(bloom_checksum);
         buf.put_u32(bloom_offset as u32);
 
         let file = FileObject::create(path.as_ref(), buf)?;

@@ -13,11 +13,12 @@
 // limitations under the License.
 
 use std::fs::{File, OpenOptions};
-use std::io::Read;
+use std::io::{Read, Write};
 use std::path::Path;
 use std::sync::Arc;
 
-use anyhow::Result;
+use anyhow::{Result, ensure};
+use bytes::{Buf, Bytes};
 use parking_lot::{Mutex, MutexGuard};
 use serde::{Deserialize, Serialize};
 
@@ -48,9 +49,18 @@ impl Manifest {
         let mut buf = Vec::new();
         file.read_to_end(&mut buf)?;
 
-        let records = serde_json::Deserializer::from_slice(&buf)
-            .into_iter()
-            .collect::<serde_json::Result<Vec<_>>>()?;
+        let mut bytes: Bytes = buf.into();
+        let mut records = Vec::new();
+        while !bytes.is_empty() {
+            let record_length = bytes.get_u32();
+            let encoded_record = bytes.slice(..record_length as usize);
+            bytes.advance(record_length as usize);
+            let expected_checksum = bytes.get_u32();
+            let checksum = crc32fast::hash(&encoded_record);
+            ensure!(checksum == expected_checksum);
+
+            records.push(serde_json::from_slice(&encoded_record)?);
+        }
 
         Ok((
             Self {
@@ -71,7 +81,12 @@ impl Manifest {
     pub fn add_record_when_init(&self, record: ManifestRecord) -> Result<()> {
         let mut file = self.file.lock();
 
-        serde_json::to_writer(&mut *file, &record)?;
+        let encoded_record = serde_json::to_vec(&record)?;
+        let checksum = crc32fast::hash(&encoded_record);
+        file.write_all(&(encoded_record.len() as u32).to_be_bytes())?;
+        file.write_all(&encoded_record)?;
+        file.write_all(&checksum.to_be_bytes())?;
+
         file.sync_all()?;
 
         Ok(())
