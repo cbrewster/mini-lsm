@@ -12,15 +12,13 @@
 // WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
 // See the License for the specific language governing permissions and
 // limitations under the License.
-#![allow(unused_variables)] // TODO(you): remove this lint after implementing this mod
-#![allow(dead_code)] // TODO(you): remove this lint after implementing this mod
 
 use anyhow::Result;
 use bytes::Bytes;
 use crossbeam_skiplist::SkipMap;
 use parking_lot::Mutex;
-use std::fs::File;
-use std::io::BufWriter;
+use std::fs::{File, OpenOptions};
+use std::io::{BufWriter, ErrorKind, Read, Write};
 use std::path::Path;
 use std::sync::Arc;
 
@@ -31,16 +29,51 @@ pub struct Wal {
 }
 
 impl Wal {
-    pub fn create(_path: impl AsRef<Path>) -> Result<Self> {
-        unimplemented!()
+    pub fn create(path: impl AsRef<Path>) -> Result<Self> {
+        Ok(Self {
+            file: Arc::new(Mutex::new(BufWriter::new(File::create(path)?))),
+        })
     }
 
-    pub fn recover(_path: impl AsRef<Path>, _skiplist: &SkipMap<Bytes, Bytes>) -> Result<Self> {
-        unimplemented!()
+    pub fn recover(path: impl AsRef<Path>, skiplist: &SkipMap<Bytes, Bytes>) -> Result<Self> {
+        let mut file = OpenOptions::new().append(true).read(true).open(path)?;
+
+        loop {
+            let mut key_len_bytes = [0u8; 2];
+            if let Err(error) = file.read_exact(&mut key_len_bytes[..]) {
+                if error.kind() == ErrorKind::UnexpectedEof {
+                    break;
+                }
+                return Err(error.into());
+            }
+            let key_len = u16::from_be_bytes(key_len_bytes);
+
+            let mut key = vec![0u8; key_len as usize];
+            file.read_exact(&mut key[..])?;
+
+            let mut value_len_bytes = [0u8; 2];
+            file.read_exact(&mut value_len_bytes[..])?;
+            let value_len = u16::from_be_bytes(value_len_bytes);
+
+            let mut value = vec![0u8; value_len as usize];
+            file.read_exact(&mut value[..])?;
+
+            skiplist.insert(key.into(), value.into());
+        }
+
+        Ok(Self {
+            file: Arc::new(Mutex::new(BufWriter::new(file))),
+        })
     }
 
-    pub fn put(&self, _key: &[u8], _value: &[u8]) -> Result<()> {
-        unimplemented!()
+    pub fn put(&self, key: &[u8], value: &[u8]) -> Result<()> {
+        let mut file = self.file.lock();
+        file.write_all(&(key.len() as u16).to_be_bytes())?;
+        file.write_all(key)?;
+        file.write_all(&(value.len() as u16).to_be_bytes())?;
+        file.write_all(value)?;
+        file.flush()?;
+        Ok(())
     }
 
     /// Implement this in week 3, day 5; if you want to implement this earlier, use `&[u8]` as the key type.
@@ -49,6 +82,7 @@ impl Wal {
     }
 
     pub fn sync(&self) -> Result<()> {
-        unimplemented!()
+        self.file.lock().get_mut().sync_all()?;
+        Ok(())
     }
 }
