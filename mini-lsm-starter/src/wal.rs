@@ -23,7 +23,7 @@ use std::io::{BufWriter, ErrorKind, Read, Write};
 use std::path::Path;
 use std::sync::Arc;
 
-use crate::key::KeySlice;
+use crate::key::{KeyBytes, KeySlice};
 
 pub struct Wal {
     file: Arc<Mutex<BufWriter<File>>>,
@@ -36,7 +36,7 @@ impl Wal {
         })
     }
 
-    pub fn recover(path: impl AsRef<Path>, skiplist: &SkipMap<Bytes, Bytes>) -> Result<Self> {
+    pub fn recover(path: impl AsRef<Path>, skiplist: &SkipMap<KeyBytes, Bytes>) -> Result<Self> {
         let mut file = OpenOptions::new().append(true).read(true).open(path)?;
 
         loop {
@@ -52,6 +52,10 @@ impl Wal {
             let mut key = vec![0u8; key_len as usize];
             file.read_exact(&mut key[..])?;
 
+            let mut key_ts_bytes = [0u8; 8];
+            file.read_exact(&mut key_ts_bytes[..])?;
+            let key_ts = u64::from_be_bytes(key_ts_bytes);
+
             let mut value_len_bytes = [0u8; 2];
             file.read_exact(&mut value_len_bytes[..])?;
             let value_len = u16::from_be_bytes(value_len_bytes);
@@ -64,14 +68,18 @@ impl Wal {
             let expected_checksum = u32::from_be_bytes(expected_checksum_bytes);
 
             let mut hasher = crc32fast::Hasher::new();
-            hasher.write(&key_len.to_be_bytes());
+            hasher.write(&key_len_bytes);
             hasher.write(&key);
-            hasher.write(&value_len.to_be_bytes());
+            hasher.write(&key_ts_bytes);
+            hasher.write(&value_len_bytes);
             hasher.write(&value);
             let checksum = hasher.finalize();
             ensure!(checksum == expected_checksum);
 
-            skiplist.insert(key.into(), value.into());
+            skiplist.insert(
+                KeyBytes::from_bytes_with_ts(key.into(), key_ts),
+                value.into(),
+            );
         }
 
         Ok(Self {
@@ -79,10 +87,11 @@ impl Wal {
         })
     }
 
-    pub fn put(&self, key: &[u8], value: &[u8]) -> Result<()> {
+    pub fn put(&self, key: KeySlice, value: &[u8]) -> Result<()> {
         let mut buf = BytesMut::new();
-        buf.put_u16(key.len() as u16);
-        buf.put(key);
+        buf.put_u16(key.key_len() as u16);
+        buf.put(key.key_ref());
+        buf.put_u64(key.ts());
         buf.put_u16(value.len() as u16);
         buf.put(value);
         let checksum = crc32fast::hash(&buf);

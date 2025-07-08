@@ -232,21 +232,24 @@ impl LsmStorageInner {
     {
         let mut ssts = Vec::new();
         let mut builder = None;
+        let mut last_key = Vec::new();
 
         while iter.is_valid() {
-            if iter.value().is_empty() && compact_to_bottom_level {
-                iter.next()?;
-                continue;
-            }
+            // if iter.value().is_empty() && compact_to_bottom_level {
+            //     iter.next()?;
+            //     continue;
+            // }
 
             if builder.is_none() {
                 builder = Some(SsTableBuilder::new(self.options.block_size));
             }
             builder.as_mut().unwrap().add(iter.key(), iter.value());
 
-            iter.next()?;
+            let same_as_last_key = iter.key().key_ref() == last_key;
 
-            if builder.as_ref().unwrap().estimated_size() >= self.options.target_sst_size {
+            if builder.as_ref().unwrap().estimated_size() >= self.options.target_sst_size
+                && !same_as_last_key
+            {
                 let sst_id = self.next_sst_id();
                 let builder = builder.take().unwrap();
                 ssts.push(Arc::new(builder.build(
@@ -255,6 +258,13 @@ impl LsmStorageInner {
                     self.path_of_sst(sst_id),
                 )?));
             }
+
+            if !same_as_last_key {
+                last_key.clear();
+                last_key.extend_from_slice(iter.key().key_ref());
+            }
+
+            iter.next()?;
         }
 
         if let Some(builder) = builder {

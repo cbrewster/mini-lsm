@@ -12,9 +12,6 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
-#![allow(unused_variables)] // TODO(you): remove this lint after implementing this mod
-#![allow(dead_code)] // TODO(you): remove this lint after implementing this mod
-
 use std::sync::Arc;
 
 use anyhow::Result;
@@ -48,10 +45,16 @@ impl SsTableIterator {
 
     /// Create a new iterator and seek to the first key-value pair which >= `key`.
     pub fn create_and_seek_to_key(table: Arc<SsTable>, key: KeySlice) -> Result<Self> {
-        let blk_idx = table.find_block_idx(key);
-        let blk_iter =
+        let mut blk_idx = table.find_block_idx(key);
+        let mut blk_iter =
             BlockIterator::create_and_seek_to_key(table.read_block_cached(blk_idx)?, key);
-
+        if !blk_iter.is_valid() {
+            blk_idx += 1;
+            if blk_idx < table.num_of_blocks() {
+                blk_iter =
+                    BlockIterator::create_and_seek_to_key(table.read_block_cached(blk_idx)?, key);
+            }
+        }
         Ok(Self {
             blk_iter,
             blk_idx,

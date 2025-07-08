@@ -23,6 +23,8 @@ use crate::{
 
 use super::Block;
 
+pub(crate) const SIZEOF_U64: usize = std::mem::size_of::<u64>();
+
 /// Iterates on a block.
 pub struct BlockIterator {
     /// The internal `Block`, wrapped by an `Arc`
@@ -115,11 +117,13 @@ impl BlockIterator {
         let overlap_len = entry.get_u16() as usize;
         let key_len = entry.get_u16() as usize;
         self.key.clear();
-        self.key.append(&self.first_key.raw_ref()[..overlap_len]);
+        self.key.append(&self.first_key.key_ref()[..overlap_len]);
         self.key.append(&entry[..key_len]);
         entry.advance(key_len);
+        let ts = entry.get_u64();
+        self.key.set_ts(ts);
         let value_len = entry.get_u16() as usize;
-        let value_start = offset + key_len + 3 * SIZEOF_U16;
+        let value_start = offset + key_len + (3 * SIZEOF_U16) + SIZEOF_U64;
         self.value_range = (value_start, value_start + value_len);
     }
 

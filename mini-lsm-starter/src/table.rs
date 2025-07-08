@@ -53,10 +53,12 @@ impl BlockMeta {
     pub fn encode_block_meta(block_meta: &[BlockMeta], buf: &mut Vec<u8>) {
         for meta in block_meta {
             buf.put_u32(meta.offset as u32);
-            buf.put_u16(meta.first_key.len() as u16);
-            buf.put(meta.first_key.raw_ref());
-            buf.put_u16(meta.last_key.len() as u16);
-            buf.put(meta.last_key.raw_ref());
+            buf.put_u16(meta.first_key.key_len() as u16);
+            buf.put(meta.first_key.key_ref());
+            buf.put_u64(meta.first_key.ts());
+            buf.put_u16(meta.last_key.key_len() as u16);
+            buf.put(meta.last_key.key_ref());
+            buf.put_u64(meta.last_key.ts());
         }
     }
 
@@ -67,12 +69,14 @@ impl BlockMeta {
             let offset = buf.get_u32() as usize;
             let first_key_len = buf.get_u16();
             let first_key = buf.copy_to_bytes(first_key_len as usize);
+            let first_key_ts = buf.get_u64();
             let last_key_len = buf.get_u16();
             let last_key = buf.copy_to_bytes(last_key_len as usize);
+            let last_key_ts = buf.get_u64();
             block_meta.push(BlockMeta {
                 offset,
-                first_key: KeyBytes::from_bytes(first_key),
-                last_key: KeyBytes::from_bytes(last_key),
+                first_key: KeyBytes::from_bytes_with_ts(first_key, first_key_ts),
+                last_key: KeyBytes::from_bytes_with_ts(last_key, last_key_ts),
             });
         }
         block_meta

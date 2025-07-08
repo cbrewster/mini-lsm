@@ -39,6 +39,7 @@ pub struct LsmIterator {
     inner: LsmIteratorInner,
     end_bound: Bound<Bytes>,
     is_valid: bool,
+    prev_key: Vec<u8>,
 }
 
 impl LsmIterator {
@@ -47,8 +48,9 @@ impl LsmIterator {
             is_valid: inner.is_valid(),
             inner,
             end_bound,
+            prev_key: Vec::new(),
         };
-        iter.skip_deletes()?;
+        iter.move_to_key()?;
         Ok(iter)
     }
 
@@ -59,16 +61,27 @@ impl LsmIterator {
             return Ok(());
         }
         match self.end_bound.as_ref() {
-            Bound::Included(key) => self.is_valid = self.inner.key().raw_ref() <= key.as_ref(),
-            Bound::Excluded(key) => self.is_valid = self.inner.key().raw_ref() < key.as_ref(),
+            Bound::Included(key) => self.is_valid = self.inner.key().key_ref() <= key.as_ref(),
+            Bound::Excluded(key) => self.is_valid = self.inner.key().key_ref() < key.as_ref(),
             Bound::Unbounded => {}
         }
         Ok(())
     }
 
-    fn skip_deletes(&mut self) -> Result<()> {
-        while self.is_valid() && self.value().is_empty() {
-            self.next_inner()?;
+    fn move_to_key(&mut self) -> Result<()> {
+        loop {
+            while self.inner.is_valid() && self.inner.key().key_ref() == self.prev_key {
+                self.next_inner()?;
+            }
+            if !self.inner.is_valid() {
+                break;
+            }
+            self.prev_key.clear();
+            self.prev_key.extend(self.inner.key().key_ref());
+
+            if !self.inner.value().is_empty() {
+                break;
+            }
         }
         Ok(())
     }
@@ -82,7 +95,7 @@ impl StorageIterator for LsmIterator {
     }
 
     fn key(&self) -> &[u8] {
-        self.inner.key().raw_ref()
+        self.inner.key().key_ref()
     }
 
     fn value(&self) -> &[u8] {
@@ -91,7 +104,7 @@ impl StorageIterator for LsmIterator {
 
     fn next(&mut self) -> Result<()> {
         self.next_inner()?;
-        self.skip_deletes()?;
+        self.move_to_key()?;
         Ok(())
     }
 
