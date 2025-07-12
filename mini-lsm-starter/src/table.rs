@@ -12,9 +12,6 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
-#![allow(unused_variables)] // TODO(you): remove this lint after implementing this mod
-#![allow(dead_code)] // TODO(you): remove this lint after implementing this mod
-
 pub(crate) mod bloom;
 mod builder;
 mod iterator;
@@ -35,6 +32,7 @@ use crate::lsm_storage::BlockCache;
 use self::bloom::Bloom;
 
 const SIZEOF_U32: usize = std::mem::size_of::<u32>();
+const SIZEOF_U64: usize = std::mem::size_of::<u64>();
 
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct BlockMeta {
@@ -147,24 +145,33 @@ impl SsTable {
     /// Open SSTable from a file.
     pub fn open(id: usize, block_cache: Option<Arc<BlockCache>>, file: FileObject) -> Result<Self> {
         let size = file.size();
-        let mut bloom_meta: Bytes = file
-            .read(size - 2 * SIZEOF_U32 as u64, 2 * SIZEOF_U32 as u64)?
+
+        let bloom_footer_size = 2 * SIZEOF_U32 as u64;
+        let mut bloom_footer: Bytes = file
+            .read(size - bloom_footer_size, bloom_footer_size)?
             .into();
-        let expected_bloom_checksum = bloom_meta.get_u32();
-        let bloom_offset = bloom_meta.get_u32() as u64;
-        let encoded_bloom = file.read(bloom_offset, size - bloom_offset - 2 * SIZEOF_U32 as u64)?;
+        let expected_bloom_checksum = bloom_footer.get_u32();
+        let bloom_offset = bloom_footer.get_u32() as u64;
+
+        let encoded_bloom = file.read(bloom_offset, size - bloom_offset - bloom_footer_size)?;
         let bloom_checksum = crc32fast::hash(&encoded_bloom);
         ensure!(bloom_checksum == expected_bloom_checksum);
         let bloom = Bloom::decode(&encoded_bloom)?;
 
-        let mut block_meta: Bytes = file
-            .read(bloom_offset - 2 * SIZEOF_U32 as u64, 2 * SIZEOF_U32 as u64)?
+        let block_meta_footer_size = 2 * SIZEOF_U32 as u64 + SIZEOF_U64 as u64;
+        let mut block_meta_footer: Bytes = file
+            .read(
+                bloom_offset - block_meta_footer_size,
+                block_meta_footer_size,
+            )?
             .into();
-        let expected_block_meta_checksum = block_meta.get_u32();
-        let block_meta_offset = block_meta.get_u32() as usize;
+        let expected_block_meta_checksum = block_meta_footer.get_u32();
+        let block_meta_offset = block_meta_footer.get_u32() as usize;
+        let max_ts = block_meta_footer.get_u64();
+
         let encoded_block_meta = file.read(
             block_meta_offset as u64,
-            bloom_offset - block_meta_offset as u64 - 2 * SIZEOF_U32 as u64,
+            bloom_offset - block_meta_offset as u64 - block_meta_footer_size,
         )?;
         let block_meta_checksum = crc32fast::hash(&encoded_block_meta);
         ensure!(block_meta_checksum == expected_block_meta_checksum);
@@ -180,7 +187,7 @@ impl SsTable {
             id,
             block_cache,
             bloom: Some(bloom),
-            max_ts: 0,
+            max_ts,
         })
     }
 

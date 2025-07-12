@@ -236,8 +236,8 @@ pub fn sync(storage: &LsmStorageInner) {
 
 pub fn compaction_bench(storage: Arc<MiniLsm>) {
     let mut key_map = BTreeMap::<usize, usize>::new();
-    let gen_key = |i| format!("{:010}", i); // 10B
-    let gen_value = |i| format!("{:0110}", i); // 110B
+    let gen_key = |i| format!("{i:010}"); // 10B
+    let gen_value = |i| format!("{i:0110}"); // 110B
     let mut max_key = 0;
     let overlaps = if TS_ENABLED { 10000 } else { 20000 };
     for iter in 0..10 {
@@ -277,18 +277,9 @@ pub fn compaction_bench(storage: Arc<MiniLsm>) {
     for i in 0..(max_key + 40000) {
         let key = gen_key(i);
         let value = storage.get(key.as_bytes()).unwrap();
-        let iter = storage
-            .scan(Bound::Included(key.as_bytes()), Bound::Unbounded)
-            .unwrap();
         if let Some(val) = key_map.get(&i) {
             let expected_value = gen_value(*val);
-            assert_eq!(
-                value,
-                Some(Bytes::from(expected_value.clone())),
-                "key {key} iter.key {} iter.value {}",
-                String::from_utf8_lossy(iter.key()),
-                String::from_utf8_lossy(iter.value()),
-            );
+            assert_eq!(value, Some(Bytes::from(expected_value.clone())));
             expected_key_value_pairs.push((Bytes::from(key), Bytes::from(expected_value)));
         } else {
             assert!(value.is_none());

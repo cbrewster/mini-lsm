@@ -38,15 +38,21 @@ type LsmIteratorInner = TwoMergeIterator<
 pub struct LsmIterator {
     inner: LsmIteratorInner,
     end_bound: Bound<Bytes>,
+    read_ts: u64,
     is_valid: bool,
     prev_key: Vec<u8>,
 }
 
 impl LsmIterator {
-    pub(crate) fn new(inner: LsmIteratorInner, end_bound: Bound<Bytes>) -> Result<Self> {
+    pub(crate) fn new(
+        inner: LsmIteratorInner,
+        end_bound: Bound<Bytes>,
+        read_ts: u64,
+    ) -> Result<Self> {
         let mut iter = Self {
             is_valid: inner.is_valid(),
             inner,
+            read_ts,
             end_bound,
             prev_key: Vec::new(),
         };
@@ -70,6 +76,8 @@ impl LsmIterator {
 
     fn move_to_key(&mut self) -> Result<()> {
         loop {
+            // Skip the current key if it is the same as the previous key.
+            // This skips all older versions of the key.
             while self.inner.is_valid() && self.inner.key().key_ref() == self.prev_key {
                 self.next_inner()?;
             }
@@ -78,6 +86,14 @@ impl LsmIterator {
             }
             self.prev_key.clear();
             self.prev_key.extend(self.inner.key().key_ref());
+
+            // Now let's skip any keys which are newer than read_ts.
+            while self.inner.is_valid() && self.inner.key().ts() > self.read_ts {
+                self.next_inner()?;
+            }
+            if !self.inner.is_valid() {
+                break;
+            }
 
             if !self.inner.value().is_empty() {
                 break;

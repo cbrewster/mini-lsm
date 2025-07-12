@@ -34,6 +34,7 @@ pub struct SsTableBuilder {
     builder: BlockBuilder,
     first_key: KeyVec,
     last_key: KeyVec,
+    max_ts: u64,
     data: Vec<u8>,
     pub(crate) meta: Vec<BlockMeta>,
     block_size: usize,
@@ -47,6 +48,7 @@ impl SsTableBuilder {
             builder: BlockBuilder::new(block_size),
             first_key: KeyVec::new(),
             last_key: KeyVec::new(),
+            max_ts: 0,
             data: Vec::new(),
             meta: Vec::new(),
             block_size,
@@ -59,13 +61,16 @@ impl SsTableBuilder {
     /// Note: You should split a new block when the current block is full.(`std::mem::replace` may
     /// be helpful here)
     pub fn add(&mut self, key: KeySlice, value: &[u8]) {
-        if self.first_key.is_empty() {
-            self.first_key.set_from_slice(key);
-        }
-
         self.key_hashes.push(farmhash::fingerprint32(key.key_ref()));
 
+        if key.ts() > self.max_ts {
+            self.max_ts = key.ts();
+        }
+
         if self.builder.add(key, value) {
+            if self.first_key.is_empty() {
+                self.first_key.set_from_slice(key);
+            }
             self.last_key.set_from_slice(key);
             return;
         }
@@ -74,6 +79,7 @@ impl SsTableBuilder {
         assert!(self.builder.add(key, value));
         self.first_key.set_from_slice(key);
         self.last_key.set_from_slice(key);
+        self.max_ts = key.ts();
     }
 
     /// Get the estimated size of the SSTable.
@@ -112,6 +118,7 @@ impl SsTableBuilder {
         let block_meta_checksum = crc32fast::hash(&buf[block_meta_offset..]);
         buf.put_u32(block_meta_checksum);
         buf.put_u32(block_meta_offset as u32);
+        buf.put_u64(self.max_ts);
 
         let bloom_offset = buf.len();
         let bloom = Bloom::build_from_key_hashes(
@@ -133,7 +140,7 @@ impl SsTableBuilder {
             id,
             block_cache,
             bloom: Some(bloom),
-            max_ts: 0,
+            max_ts: self.max_ts,
         })
     }
 
