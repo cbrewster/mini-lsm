@@ -36,7 +36,7 @@ use crate::iterators::concat_iterator::SstConcatIterator;
 use crate::iterators::merge_iterator::MergeIterator;
 use crate::iterators::two_merge_iterator::TwoMergeIterator;
 use crate::key::{KeySlice, TS_RANGE_BEGIN, TS_RANGE_END};
-use crate::lsm_iterator::{FusedIterator, LsmIterator};
+use crate::lsm_iterator::LsmIterator;
 use crate::manifest::{Manifest, ManifestRecord};
 use crate::mem_table::{MemTable, map_key_bound_plus_ts};
 use crate::mvcc::LsmMvccInner;
@@ -525,6 +525,7 @@ impl LsmStorageInner {
         let _write_lock = self.mvcc().write_lock.lock();
 
         let ts = self.mvcc().latest_commit_ts() + 1;
+        let mut memtable_batch = Vec::new();
         for record in batch {
             match record {
                 WriteBatchRecord::Put(key, value) => {
@@ -532,25 +533,23 @@ impl LsmStorageInner {
                     let value = value.as_ref();
                     assert!(!key.is_empty(), "key cannot be empty");
                     assert!(!value.is_empty(), "value cannot be empty");
-                    let size = {
-                        let guard = self.state.read();
-                        guard.memtable.put(KeySlice::from_slice(key, ts), value)?;
-                        guard.memtable.approximate_size()
-                    };
-                    self.try_freeze(size)?;
+                    memtable_batch.push((KeySlice::from_slice(key, ts), value));
                 }
                 WriteBatchRecord::Del(key) => {
                     let key = key.as_ref();
                     assert!(!key.is_empty(), "key cannot be empty");
-                    let size = {
-                        let guard = self.state.read();
-                        guard.memtable.put(KeySlice::from_slice(key, ts), b"")?;
-                        guard.memtable.approximate_size()
-                    };
-                    self.try_freeze(size)?;
+                    memtable_batch.push((KeySlice::from_slice(key, ts), &[]));
                 }
             }
         }
+
+        let size = {
+            let guard = self.state.read();
+            guard.memtable.put_batch(&memtable_batch)?;
+            guard.memtable.approximate_size()
+        };
+
+        self.try_freeze(size)?;
         self.mvcc().update_commit_ts(ts);
         Ok(())
     }
@@ -695,7 +694,7 @@ impl LsmStorageInner {
         lower: Bound<&[u8]>,
         upper: Bound<&[u8]>,
         read_ts: u64,
-    ) -> Result<FusedIterator<LsmIterator>> {
+    ) -> Result<LsmIterator> {
         let snapshot = {
             let guard = self.state.read();
             Arc::clone(&guard)
@@ -787,11 +786,7 @@ impl LsmStorageInner {
             MergeIterator::create(level_iters),
         )?;
 
-        Ok(FusedIterator::new(LsmIterator::new(
-            iter,
-            upper.map(Bytes::copy_from_slice),
-            read_ts,
-        )?))
+        LsmIterator::new(iter, upper.map(Bytes::copy_from_slice), read_ts)
     }
 }
 

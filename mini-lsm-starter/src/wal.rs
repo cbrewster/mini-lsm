@@ -14,11 +14,10 @@
 // limitations under the License.
 
 use anyhow::{Result, ensure};
-use bytes::{BufMut, Bytes, BytesMut};
+use bytes::{Buf, BufMut, Bytes, BytesMut};
 use crossbeam_skiplist::SkipMap;
 use parking_lot::Mutex;
 use std::fs::{File, OpenOptions};
-use std::hash::Hasher;
 use std::io::{BufWriter, ErrorKind, Read, Write};
 use std::path::Path;
 use std::sync::Arc;
@@ -40,46 +39,36 @@ impl Wal {
         let mut file = OpenOptions::new().append(true).read(true).open(path)?;
 
         loop {
-            let mut key_len_bytes = [0u8; 2];
-            if let Err(error) = file.read_exact(&mut key_len_bytes[..]) {
+            let mut body_len_bytes = [0u8; 4];
+            if let Err(error) = file.read_exact(&mut body_len_bytes[..]) {
                 if error.kind() == ErrorKind::UnexpectedEof {
                     break;
                 }
                 return Err(error.into());
             }
-            let key_len = u16::from_be_bytes(key_len_bytes);
+            let body_len = u32::from_be_bytes(body_len_bytes);
 
-            let mut key = vec![0u8; key_len as usize];
-            file.read_exact(&mut key[..])?;
+            let mut body = vec![0u8; body_len as usize];
+            file.read_exact(&mut body)?;
+            let mut cursor = &body[..];
 
-            let mut key_ts_bytes = [0u8; 8];
-            file.read_exact(&mut key_ts_bytes[..])?;
-            let key_ts = u64::from_be_bytes(key_ts_bytes);
+            let key_len = cursor.get_u16();
+            let key = Bytes::copy_from_slice(&cursor[..key_len as usize]);
+            cursor.advance(key_len as usize);
 
-            let mut value_len_bytes = [0u8; 2];
-            file.read_exact(&mut value_len_bytes[..])?;
-            let value_len = u16::from_be_bytes(value_len_bytes);
+            let key_ts = cursor.get_u64();
 
-            let mut value = vec![0u8; value_len as usize];
-            file.read_exact(&mut value[..])?;
+            let value_len = cursor.get_u16();
+            let value = Bytes::copy_from_slice(&cursor[..value_len as usize]);
 
             let mut expected_checksum_bytes = [0u8; 4];
             file.read_exact(&mut expected_checksum_bytes[..])?;
             let expected_checksum = u32::from_be_bytes(expected_checksum_bytes);
 
-            let mut hasher = crc32fast::Hasher::new();
-            hasher.write(&key_len_bytes);
-            hasher.write(&key);
-            hasher.write(&key_ts_bytes);
-            hasher.write(&value_len_bytes);
-            hasher.write(&value);
-            let checksum = hasher.finalize();
+            let checksum = crc32fast::hash(&body);
             ensure!(checksum == expected_checksum);
 
-            skiplist.insert(
-                KeyBytes::from_bytes_with_ts(key.into(), key_ts),
-                value.into(),
-            );
+            skiplist.insert(KeyBytes::from_bytes_with_ts(key, key_ts), value);
         }
 
         Ok(Self {
@@ -88,24 +77,28 @@ impl Wal {
     }
 
     pub fn put(&self, key: KeySlice, value: &[u8]) -> Result<()> {
-        let mut buf = BytesMut::new();
-        buf.put_u16(key.key_len() as u16);
-        buf.put(key.key_ref());
-        buf.put_u64(key.ts());
-        buf.put_u16(value.len() as u16);
-        buf.put(value);
-        let checksum = crc32fast::hash(&buf);
-        buf.put_u32(checksum);
-
-        let mut file = self.file.lock();
-        file.write_all(&buf)?;
-        file.flush()?;
-        Ok(())
+        self.put_batch(&[(key, value)])
     }
 
     /// Implement this in week 3, day 5; if you want to implement this earlier, use `&[u8]` as the key type.
-    pub fn put_batch(&self, _data: &[(KeySlice, &[u8])]) -> Result<()> {
-        unimplemented!()
+    pub fn put_batch(&self, data: &[(KeySlice, &[u8])]) -> Result<()> {
+        let mut body = BytesMut::new();
+        for (key, value) in data {
+            body.put_u16(key.key_len() as u16);
+            body.put(key.key_ref());
+            body.put_u64(key.ts());
+            body.put_u16(value.len() as u16);
+            body.put(*value);
+        }
+        let checksum = crc32fast::hash(&body);
+        let body_size = body.len() as u32;
+
+        let mut file = self.file.lock();
+        file.write_all(&body_size.to_be_bytes())?;
+        file.write_all(&body)?;
+        file.write_all(&checksum.to_be_bytes())?;
+        file.flush()?;
+        Ok(())
     }
 
     pub fn sync(&self) -> Result<()> {
