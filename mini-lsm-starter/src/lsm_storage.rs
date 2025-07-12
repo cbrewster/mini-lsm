@@ -520,8 +520,27 @@ impl LsmStorageInner {
         Ok(None)
     }
 
+    pub fn write_batch<T: AsRef<[u8]>>(
+        self: &Arc<Self>,
+        batch: &[WriteBatchRecord<T>],
+    ) -> Result<()> {
+        if !self.options.serializable {
+            self.write_batch_inner(batch)?;
+        } else {
+            let txn = self.new_txn()?;
+            for record in batch {
+                match record {
+                    WriteBatchRecord::Put(key, value) => txn.put(key.as_ref(), value.as_ref()),
+                    WriteBatchRecord::Del(key) => txn.delete(key.as_ref()),
+                }
+            }
+            txn.commit()?;
+        }
+        Ok(())
+    }
+
     /// Write a batch of data into the storage. Implement in week 2 day 7.
-    pub fn write_batch<T: AsRef<[u8]>>(&self, batch: &[WriteBatchRecord<T>]) -> Result<()> {
+    pub fn write_batch_inner<T: AsRef<[u8]>>(&self, batch: &[WriteBatchRecord<T>]) -> Result<u64> {
         let _write_lock = self.mvcc().write_lock.lock();
 
         let ts = self.mvcc().latest_commit_ts() + 1;
@@ -551,7 +570,7 @@ impl LsmStorageInner {
 
         self.try_freeze(size)?;
         self.mvcc().update_commit_ts(ts);
-        Ok(())
+        Ok(ts)
     }
 
     fn try_freeze(&self, estimate_size: usize) -> Result<()> {
@@ -568,12 +587,14 @@ impl LsmStorageInner {
 
     /// Put a key-value pair into the storage by writing into the current memtable.
     pub fn put(&self, key: &[u8], value: &[u8]) -> Result<()> {
-        self.write_batch(&[WriteBatchRecord::Put(key, value)])
+        self.write_batch_inner(&[WriteBatchRecord::Put(key, value)])?;
+        Ok(())
     }
 
     /// Remove a key from the storage by writing an empty value.
     pub fn delete(&self, key: &[u8]) -> Result<()> {
-        self.write_batch(&[WriteBatchRecord::Del(key)])
+        self.write_batch_inner(&[WriteBatchRecord::Del(key)])?;
+        Ok(())
     }
 
     pub(crate) fn path_of_sst_static(path: impl AsRef<Path>, id: usize) -> PathBuf {

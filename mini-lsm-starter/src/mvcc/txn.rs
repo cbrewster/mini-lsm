@@ -21,7 +21,7 @@ use std::{
     },
 };
 
-use anyhow::{Result, ensure};
+use anyhow::{Result, bail, ensure};
 use bytes::Bytes;
 use crossbeam_skiplist::SkipMap;
 use ouroboros::self_referencing;
@@ -31,6 +31,7 @@ use crate::{
     iterators::{StorageIterator, two_merge_iterator::TwoMergeIterator},
     lsm_iterator::{FusedIterator, LsmIterator},
     lsm_storage::{LsmStorageInner, WriteBatchRecord},
+    mvcc::CommittedTxnData,
 };
 
 pub struct Transaction {
@@ -53,6 +54,10 @@ impl Transaction {
             } else {
                 Ok(Some(entry.value().clone()))
             };
+        }
+
+        if let Some(key_hashes) = &self.key_hashes {
+            key_hashes.lock().1.insert(farmhash::hash32(key));
         }
 
         self.inner.get_with_ts(key, self.read_ts)
@@ -89,6 +94,9 @@ impl Transaction {
         }
         self.local_storage
             .insert(Bytes::copy_from_slice(key), Bytes::copy_from_slice(value));
+        if let Some(key_hashes) = &self.key_hashes {
+            key_hashes.lock().0.insert(farmhash::hash32(key));
+        }
     }
 
     pub fn delete(&self, key: &[u8]) {
@@ -97,6 +105,9 @@ impl Transaction {
         }
         self.local_storage
             .insert(Bytes::copy_from_slice(key), Bytes::new());
+        if let Some(key_hashes) = &self.key_hashes {
+            key_hashes.lock().0.insert(farmhash::hash32(key));
+        }
     }
 
     pub fn commit(&self) -> Result<()> {
@@ -104,6 +115,26 @@ impl Transaction {
             !self.committed.swap(true, Ordering::SeqCst),
             "already committed"
         );
+
+        let mvcc = self.inner.mvcc();
+        let _commit_lock = mvcc.commit_lock.lock();
+
+        if let Some(key_hashes) = &self.key_hashes {
+            let guard = key_hashes.lock();
+            let (write_set, read_set) = &*guard;
+            let expected_commit_ts = mvcc.latest_commit_ts();
+
+            if !write_set.is_empty() {
+                let commited_txns = mvcc.committed_txns.lock();
+                for (_, txn_data) in commited_txns.range((self.read_ts + 1)..) {
+                    for key_hash in read_set {
+                        if txn_data.key_hashes.contains(key_hash) {
+                            bail!("failed to serialize transactions");
+                        }
+                    }
+                }
+            }
+        }
 
         let batch = self
             .local_storage
@@ -117,7 +148,31 @@ impl Transaction {
             })
             .collect::<Vec<_>>();
 
-        self.inner.write_batch(&batch)
+        let commit_ts = self.inner.write_batch_inner(&batch)?;
+
+        if let Some(key_hashes) = &self.key_hashes {
+            let mut guard = key_hashes.lock();
+            let (write_set, _) = &mut *guard;
+            mvcc.committed_txns.lock().insert(
+                commit_ts,
+                CommittedTxnData {
+                    key_hashes: std::mem::take(write_set),
+                    read_ts: self.read_ts,
+                    commit_ts,
+                },
+            );
+
+            let mut commited_txns = mvcc.committed_txns.lock();
+            let watermark = mvcc.watermark();
+            while let Some(entry) = commited_txns.first_entry() {
+                if *entry.key() >= watermark {
+                    break;
+                }
+                entry.remove();
+            }
+        }
+
+        Ok(())
     }
 }
 
@@ -180,6 +235,9 @@ impl TxnIterator {
     ) -> Result<Self> {
         let mut iter = TxnIterator { txn, iter };
         iter.skip_deletes()?;
+        if iter.is_valid() {
+            iter.add_to_read_set(iter.key());
+        }
         Ok(iter)
     }
 
@@ -188,6 +246,12 @@ impl TxnIterator {
             self.iter.next()?;
         }
         Ok(())
+    }
+
+    fn add_to_read_set(&self, key: &[u8]) {
+        if let Some(key_hashes) = &self.txn.key_hashes {
+            key_hashes.lock().1.insert(farmhash::hash32(key));
+        }
     }
 }
 
@@ -212,6 +276,9 @@ impl StorageIterator for TxnIterator {
     fn next(&mut self) -> Result<()> {
         self.iter.next()?;
         self.skip_deletes()?;
+        if self.is_valid() {
+            self.add_to_read_set(self.key());
+        }
         Ok(())
     }
 
