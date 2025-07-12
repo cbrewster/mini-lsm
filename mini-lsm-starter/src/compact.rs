@@ -234,18 +234,31 @@ impl LsmStorageInner {
         let mut builder = None;
         let mut last_key = Vec::new();
 
+        let watermark = self.mvcc().watermark();
+        println!("watermark {watermark} bottom {compact_to_bottom_level}");
+
         while iter.is_valid() {
-            // if iter.value().is_empty() && compact_to_bottom_level {
-            //     iter.next()?;
-            //     continue;
-            // }
+            let same_as_last_key = iter.key().key_ref() == last_key;
+
+            if (iter.key().ts() < watermark && same_as_last_key)
+                || (iter.key().ts() <= watermark
+                    && iter.value().is_empty()
+                    && compact_to_bottom_level)
+            {
+                if !same_as_last_key {
+                    last_key.clear();
+                    last_key.extend_from_slice(iter.key().key_ref());
+                }
+                while iter.is_valid() && iter.key().key_ref() == last_key {
+                    iter.next()?;
+                }
+                continue;
+            }
 
             if builder.is_none() {
                 builder = Some(SsTableBuilder::new(self.options.block_size));
             }
             builder.as_mut().unwrap().add(iter.key(), iter.value());
-
-            let same_as_last_key = iter.key().key_ref() == last_key;
 
             if builder.as_ref().unwrap().estimated_size() >= self.options.target_sst_size
                 && !same_as_last_key
