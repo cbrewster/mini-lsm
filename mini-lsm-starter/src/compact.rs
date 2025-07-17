@@ -259,6 +259,10 @@ impl LsmStorageInner {
 
             if iter.key().ts() <= watermark {
                 if !first_key_below_watermark {
+                    if !same_as_last_key {
+                        last_key.clear();
+                        last_key.extend_from_slice(iter.key().key_ref());
+                    }
                     iter.next()?;
                     continue;
                 }
@@ -277,6 +281,10 @@ impl LsmStorageInner {
                     }
                 }
                 if matches_filter {
+                    if !same_as_last_key {
+                        last_key.clear();
+                        last_key.extend_from_slice(iter.key().key_ref());
+                    }
                     iter.next()?;
                     continue;
                 }
