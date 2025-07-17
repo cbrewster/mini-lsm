@@ -35,7 +35,7 @@ use crate::iterators::concat_iterator::SstConcatIterator;
 use crate::iterators::merge_iterator::MergeIterator;
 use crate::iterators::two_merge_iterator::TwoMergeIterator;
 use crate::key::KeySlice;
-use crate::lsm_storage::{LsmStorageInner, LsmStorageState};
+use crate::lsm_storage::{CompactionFilter, LsmStorageInner, LsmStorageState};
 use crate::manifest::ManifestRecord;
 use crate::table::{SsTable, SsTableBuilder, SsTableIterator};
 
@@ -237,22 +237,49 @@ impl LsmStorageInner {
         let watermark = self.mvcc().watermark();
         println!("watermark {watermark} bottom {compact_to_bottom_level}");
 
+        let compaction_filters = self.compaction_filters.lock().clone();
+        let mut first_key_below_watermark = false;
         while iter.is_valid() {
             let same_as_last_key = iter.key().key_ref() == last_key;
+            if !same_as_last_key {
+                first_key_below_watermark = true;
+            }
 
-            if (iter.key().ts() < watermark && same_as_last_key)
-                || (iter.key().ts() <= watermark
-                    && iter.value().is_empty()
-                    && compact_to_bottom_level)
+            if compact_to_bottom_level
+                && !same_as_last_key
+                && iter.key().ts() <= watermark
+                && iter.value().is_empty()
             {
-                if !same_as_last_key {
-                    last_key.clear();
-                    last_key.extend_from_slice(iter.key().key_ref());
-                }
-                while iter.is_valid() && iter.key().key_ref() == last_key {
-                    iter.next()?;
-                }
+                last_key.clear();
+                last_key.extend_from_slice(iter.key().key_ref());
+                iter.next()?;
+                first_key_below_watermark = false;
                 continue;
+            }
+
+            if iter.key().ts() <= watermark {
+                if !first_key_below_watermark {
+                    iter.next()?;
+                    continue;
+                }
+                first_key_below_watermark = false;
+
+                let key_ref = iter.key().key_ref();
+                let mut matches_filter = false;
+                for filter in &compaction_filters {
+                    match filter {
+                        CompactionFilter::Prefix(prefix) => {
+                            if key_ref.starts_with(prefix) {
+                                matches_filter = true;
+                                break;
+                            }
+                        }
+                    }
+                }
+                if matches_filter {
+                    iter.next()?;
+                    continue;
+                }
             }
 
             if builder.is_none() {
